@@ -105,10 +105,12 @@ export class Recorder {
   }
 
   /**
-   * Ask for the screen and mic, then start.
+   * Ask for the screen, mic and camera, and start listening. Recording itself
+   * starts with begin(), after the countdown, so the listener is already warm
+   * and your first words ("big camera") are heard.
    * @param {{lang: string, systemAudio: boolean, camera: boolean}} opts
    */
-  async start(opts) {
+  async prepare(opts) {
     this.lang = opts.lang;
     const display = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: 30 }, width: { max: 1920 }, height: { max: 1080 } },
@@ -168,13 +170,22 @@ export class Recorder {
     sink.gain.value = 0;
     meter.connect(sink).connect(actx.destination);
     meter.port.onmessage = (e) => {
+      this.ev.onLevel?.(e.data.rms);
       if (!this.running) return;
       const t = e.data.t - this.audioT0;
       const i = Math.floor(t / LEVEL_DT);
       if (i >= 0) this.levelValues[i] = e.data.rms;
-      this.ev.onLevel?.(e.data.rms);
     };
 
+    /** Your camera, for the live preview on the slate. */
+    this.camStream = cam;
+    this.prep = { video, mix, cam, actx };
+    this.startSpeech();
+  }
+
+  /** Start recording (after the countdown). */
+  async begin() {
+    const { video, mix, cam, actx } = /** @type {any} */ (this.prep);
     this.mime = recordingMime();
     const stream = new MediaStream([video, ...mix.stream.getAudioTracks()]);
     this.rec = new MediaRecorder(stream, { mimeType: this.mime, videoBitsPerSecond: 6_000_000 });
@@ -206,7 +217,18 @@ export class Recorder {
     this.running = true;
 
     this.startMotion(video);
-    this.startSpeech();
+  }
+
+  /** Give up before recording started (the countdown was cancelled). */
+  cancel() {
+    this.listening = false;
+    try {
+      this.speech?.stop();
+    } catch {
+      /* ignore */
+    }
+    for (const st of this.streams) st.getTracks().forEach((t) => t.stop());
+    this.actx?.close();
   }
 
   /** Sample the screen 5× a second into a tiny grid; keep a filmstrip. */
@@ -278,6 +300,7 @@ export class Recorder {
     }
     /** @type {Map<number, number>} first time each result index was heard */
     let firstSeen = new Map();
+    this.listening = true;
     const open = () => {
       const r = new SR();
       r.lang = this.lang;
@@ -312,7 +335,7 @@ export class Recorder {
         }
       };
       r.onend = () => {
-        if (this.running && !this.speechBlocked) setTimeout(open, 100);
+        if (this.listening && !this.speechBlocked) setTimeout(open, 100);
       };
       try {
         r.start();
@@ -328,6 +351,7 @@ export class Recorder {
   async stop() {
     const duration = this.now();
     this.running = false;
+    this.listening = false;
     try {
       this.speech?.stop();
     } catch {

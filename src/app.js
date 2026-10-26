@@ -1,60 +1,66 @@
 // @ts-check
 import { GRAMMAR, describe, stripCommands } from './commands.js';
-import { buildPlan, srcToOut, fmt, toSrt, toVtt, youtubeChapters, DEFAULTS } from './plan.js';
+import { buildPlan, srcToOut, fmt, toSrt, toVtt, youtubeChapters, cameraModeAt, DEFAULTS } from './plan.js';
 import { Recorder, canRecord, canTranscribe } from './recorder.js';
 import { Player, VideoSource, SampleSource, CameraTrack, exportVideo, exportFormat } from './player.js';
 import { buildSampleTake } from './sample.js';
 import { saveTake, loadTake, prefs } from './store.js';
-import { DEFAULT_LOOK } from './render.js';
+import { DEFAULT_LOOK, camRect } from './render.js';
+import { icon, iconEl } from './icons.js';
 
 /** @typedef {import('./plan.js').Plan} Plan */
 /** @typedef {import('./plan.js').Take} Take */
+/** @typedef {'final'|'demo'|'raw'} View */
 
 /** @param {string} id */
 const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
 /** @param {string} id */
 const input = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
 
+/** Colour for each command in the UI. */
 const COLORS = {
   cut: 'var(--cut)', hide: 'var(--blur)', zoomIn: 'var(--zoom)', zoomOut: 'var(--zoom)', highlight: 'var(--spot)',
   speedUp: 'var(--speed)', normalSpeed: 'var(--speed)', chapter: 'var(--text)', title: 'var(--text)', mark: 'var(--muted)',
-  camBig: '#3ecf6f', camSmall: '#3ecf6f', camHide: '#3ecf6f', camShow: '#3ecf6f',
+  camBig: 'var(--cam)', camSmall: 'var(--cam)', camHide: 'var(--cam)', camShow: 'var(--cam)',
 };
 
 const HINDI = {
   cut: 'kaat do · काट दो', hide: 'chhupa do · छुपा दो', zoomIn: 'zoom karo · ज़ूम करो', zoomOut: 'zoom out karo',
   highlight: 'yahan dekho · यहाँ देखो', speedUp: 'tez karo · तेज़ करो', normalSpeed: 'normal karo', chapter: 'अध्याय: …',
-  title: 'टाइटल: …', mark: '',
-  camBig: 'camera bada karo', camSmall: 'camera chhota karo', camHide: 'camera band karo', camShow: 'camera chalu karo',
+  title: 'टाइटल: …', mark: '', camBig: 'camera bada karo', camSmall: 'camera chhota karo', camHide: 'camera band karo',
+  camShow: 'camera chalu karo',
 };
 
 const DOES = {
-  cut: 'Cuts the sentence you just fumbled, and anything you did on screen while saying it.',
-  hide: 'Blurs whatever just appeared on screen, from the moment it appeared until it leaves the screen.',
-  zoomIn: 'Smoothly zooms into the part of the screen that just changed.',
+  cut: 'Cuts the sentence you just fumbled, and what happened on screen while you said it.',
+  hide: 'Blurs whatever just appeared on screen, from the moment it appeared until it leaves.',
+  zoomIn: 'Glides into the part of the screen that just changed.',
   zoomOut: 'Eases back to the full screen.',
-  highlight: 'Dims the screen and rings what just changed for three seconds.',
-  speedUp: 'Fast-forwards until you say “normal speed”, with a badge so viewers know.',
+  highlight: 'Dims the screen and rings what just changed.',
+  speedUp: 'Fast-forwards the slow part until you say “normal speed”.',
   normalSpeed: 'Ends the fast-forward.',
-  chapter: 'Starts a chapter with an on-screen card, and a YouTube timestamp.',
-  title: 'Puts a title card on the opening seconds.',
-  mark: 'Drops a bookmark you can jump to in the editor.',
-  camBig: 'Grows your camera bubble to fill the frame, for intros and outros.',
-  camSmall: 'Sends your camera back to its corner. “Back to the screen” works too.',
-  camHide: 'Hides your camera bubble when it covers something.',
-  camShow: 'Brings the camera bubble back.',
+  chapter: 'Starts a chapter with an on-screen card and a YouTube timestamp.',
+  title: 'Opens the video with a title card.',
+  mark: 'Drops a bookmark you can jump to.',
+  camBig: 'Grows your camera bubble to fill the frame. Great for intros.',
+  camSmall: 'Sends your bubble back to its spot. “Back to the screen” works too.',
+  camHide: 'Tucks your bubble away when it covers something.',
+  camShow: 'Brings your bubble back.',
 };
 
 // ---------------------------------------------------------------- state
 
 const state = {
-  /** @type {(Take & {kind: string, width: number, height: number, thumbs: {t: number, url: string}[], levelThreshold?: number, blob?: Blob}) | null} */
+  /** @type {any} */
   take: null,
   /** @type {Plan | null} */
   plan: null,
   /** @type {Plan | null} */
+  demo: null,
+  /** @type {Plan | null} */
   raw: null,
-  showRaw: false,
+  /** @type {View} */
+  view: 'final',
   /** @type {string[]} */
   disabled: [],
   /** @type {Player | null} */
@@ -77,14 +83,15 @@ function options() {
 function rebuild() {
   if (!state.take) return;
   state.plan = buildPlan(state.take, options());
+  state.demo = buildPlan(state.take, { ...options(), showDirections: true });
   const raw = buildPlan(state.take, { ...options(), trimDeadAir: false, disabled: state.plan.commands.map((c) => c.id) });
   state.raw = { ...raw, captions: [] };
   renderEditor();
 }
 
-const currentPlan = () => /** @type {Plan} */ (state.showRaw ? state.raw : state.plan);
+const currentPlan = () => /** @type {Plan} */ (state.view === 'raw' ? state.raw : state.view === 'demo' ? state.demo : state.plan);
 
-// ---------------------------------------------------------------- screens
+// ---------------------------------------------------------------- general UI
 
 /** @param {'home'|'rec'|'edit'} name */
 function show(name) {
@@ -103,19 +110,38 @@ function toast(msg) {
   toastTimer = setTimeout(() => (el.hidden = true), 2600);
 }
 
+/** @param {string} id @param {string} msg */
+function note(id, msg) {
+  const el = $(id);
+  el.textContent = msg;
+  el.hidden = false;
+}
+
+/** @param {string} type */
+function badge(type, cls) {
+  const span = document.createElement('span');
+  span.className = cls;
+  span.style.setProperty('--c', COLORS[/** @type {keyof typeof COLORS} */ (type)] || 'var(--accent)');
+  span.append(iconEl(type));
+  return span;
+}
+
 // ---------------------------------------------------------------- home
 
 function renderVocab() {
   $('vocab').replaceChildren(
     ...GRAMMAR.map((g) => {
       const li = document.createElement('li');
+      li.className = 'cmd-card';
+      li.style.setProperty('--c', COLORS[g.type]);
+      const ic = badge(g.type, 'cmd-icon');
       const say = document.createElement('span');
       say.className = 'say';
-      say.textContent = g.say;
+      say.textContent = `“${g.say}”`;
       const does = document.createElement('span');
       does.className = 'does';
       does.textContent = DOES[g.type];
-      li.append(say, does);
+      li.append(ic, say, does);
       if (HINDI[g.type]) {
         const alias = document.createElement('span');
         alias.className = 'alias';
@@ -135,6 +161,7 @@ let recorder = null;
 let hudTimer;
 /** @type {Window | null} */
 let pip = null;
+let countdownCancelled = false;
 
 async function startRecording() {
   if (!canRecord()) {
@@ -143,6 +170,8 @@ async function startRecording() {
   }
   const lang = /** @type {HTMLSelectElement} */ ($('lang')).value;
   prefs.set('lang', lang);
+  prefs.set('camera', input('camera').checked ? '1' : '0');
+  prefs.set('start-big', input('start-big').checked ? '1' : '0');
   $('hud-log').replaceChildren();
   $('hud-heard').textContent = 'Listening…';
   $('hud-interim').textContent = '';
@@ -155,36 +184,61 @@ async function startRecording() {
     onWarn: (m) => toast(m),
   });
   try {
-    prefs.set('camera', input('camera').checked ? '1' : '0');
-    await recorder.start({ lang, systemAudio: input('system-audio').checked, camera: input('camera').checked });
+    await recorder.prepare({ lang, systemAudio: input('system-audio').checked, camera: input('camera').checked });
   } catch (e) {
     recorder = null;
     if (/** @type {any} */ (e)?.name === 'NotAllowedError') return; // they cancelled the picker
     note('support-note', /** @type {Error} */ (e).message || 'Recording could not start.');
     return;
   }
+
+  // Live preview of your camera on the slate.
+  const camVid = /** @type {HTMLVideoElement} */ ($('hud-cam'));
+  camVid.hidden = !recorder.camStream;
+  if (recorder.camStream) {
+    camVid.srcObject = recorder.camStream;
+    camVid.play().catch(() => {});
+  }
   show('rec');
+
+  // 3-2-1, while Retake is already listening.
+  countdownCancelled = false;
+  $('countdown').hidden = false;
+  for (const n of [3, 2, 1]) {
+    $('count-num').textContent = String(n);
+    await new Promise((r) => setTimeout(r, 1000));
+    if (countdownCancelled) return;
+  }
+  $('countdown').hidden = true;
+  await recorder.begin();
   const tick = () => ($('hud-time').textContent = fmt(recorder?.now() ?? 0));
   tick();
   hudTimer = setInterval(tick, 250);
-  if (!canTranscribe()) toast('This browser can’t hear directions. The video still records.');
+  if (!canTranscribe()) toast('This browser can’t hear commands. The video still records.');
+}
+
+function cancelCountdown() {
+  countdownCancelled = true;
+  $('countdown').hidden = true;
+  recorder?.cancel();
+  recorder = null;
+  show('home');
 }
 
 /** @param {import('./commands.js').Command} c */
 function logCommand(c) {
   const li = document.createElement('li');
-  li.style.borderLeftColor = COLORS[c.type];
-  const when = document.createElement('span');
-  when.className = 'when';
-  when.textContent = fmt(c.time);
   const what = document.createElement('span');
   what.className = 'what';
   what.textContent = describe(c);
   const heard = document.createElement('span');
   heard.className = 'heard';
-  heard.textContent = `“${c.heard}”`;
+  heard.textContent = `you said “${c.heard}”`;
   what.append(heard);
-  li.append(when, what);
+  const when = document.createElement('span');
+  when.className = 'when';
+  when.textContent = fmt(c.time);
+  li.append(badge(c.type, 'li-ico'), what, when);
   $('hud-log').prepend(li);
 }
 
@@ -196,11 +250,13 @@ async function stopRecording() {
   closePip();
   $('hud-heard').textContent = 'Putting your take together…';
   const take = await r.stop();
+  /** @type {HTMLVideoElement} */ ($('hud-cam')).srcObject = null;
   if (take.duration < 1) {
     show('home');
     toast('That take was too short.');
     return;
   }
+  /** @type {any} */ (take).cameraStart = input('start-big').checked ? 'big' : 'small';
   void saveTake(take);
   await openTake(take);
 }
@@ -208,14 +264,15 @@ async function stopRecording() {
 async function popOut() {
   const dpip = /** @type {any} */ (window).documentPictureInPicture;
   if (!dpip) {
-    toast('Floating slate needs Chrome or Edge 116+.');
+    toast('A floating window needs Chrome or Edge 116+.');
     return;
   }
-  pip = await dpip.requestWindow({ width: 360, height: 420 });
+  pip = await dpip.requestWindow({ width: 380, height: 480 });
   const doc = /** @type {Window} */ (pip).document;
   doc.documentElement.classList.add('pip');
   for (const link of document.querySelectorAll('link[rel="stylesheet"]')) doc.head.append(link.cloneNode());
   doc.body.append($('hud'));
+  /** @type {HTMLVideoElement} */ ($('hud-cam')).play?.().catch(() => {});
   /** @type {Window} */ (pip).addEventListener('pagehide', () => {
     $('rec').append($('hud'));
     pip = null;
@@ -237,7 +294,8 @@ async function openTake(take) {
   state.player?.destroy();
   state.take = take;
   state.disabled = [];
-  state.showRaw = false;
+  state.view = 'final';
+  setViewButtons();
 
   /** @type {import('./player.js').Source} */
   let source;
@@ -265,7 +323,7 @@ async function openTake(take) {
     source = vs;
     $('take-kind').textContent = `Your take · ${new Date(take.createdAt).toLocaleString()}`;
   }
-  // Export at the source's resolution, capped at 1080p, even dimensions.
+
   const canvas = /** @type {HTMLCanvasElement} */ ($('screen'));
   const scale = Math.min(1, 1920 / source.width, 1080 / source.height);
   canvas.width = Math.round((source.width * scale) / 2) * 2;
@@ -277,17 +335,20 @@ async function openTake(take) {
   state.player = player;
   player.onTime = (o) => renderTime(o);
   player.onEnd = () => setPlaying(false);
+  setPlaying(false);
 
   const fmtInfo = exportFormat();
-  $('export').textContent = fmtInfo ? `Export ${fmtInfo.ext.toUpperCase()} video` : 'Export not supported here';
   /** @type {HTMLButtonElement} */ ($('export')).disabled = !fmtInfo;
+  updateExportLabel();
   $('download-video').hidden = true;
 
   const warn = $('edit-warn');
   warn.hidden = take.phrases.length > 0;
-  warn.textContent = 'Retake didn’t hear any words in this take, so there were no directions to follow. Check that your microphone is on and you’re using Chrome or Edge.';
+  warn.textContent = 'Retake didn’t hear any words in this take, so there were no commands to follow. Check that your microphone is on and you’re using Chrome or Edge.';
 
   $('cam-opts').hidden = !source.camera;
+  $('drag-hint').hidden = !source.camera;
+  setTimeout(() => ($('drag-hint').hidden = true), 7000);
   renderFilm();
   show('edit');
   await player.seekOut(0);
@@ -296,8 +357,7 @@ async function openTake(take) {
 function renderEditor() {
   const plan = /** @type {Plan} */ (state.plan);
   const s = plan.stats;
-  const saved = $('saved');
-  saved.replaceChildren('Retake saved you ', Object.assign(document.createElement('em'), { textContent: `${Math.round(s.removed)}s` }));
+  $('saved').replaceChildren('Retake saved you ', Object.assign(document.createElement('em'), { textContent: `${Math.round(s.removed)}s` }));
 
   /** @type {[string, string][]} */
   const chips = [];
@@ -307,7 +367,7 @@ function renderEditor() {
   if (s.hidden) chips.push(['var(--blur)', `${s.hidden} secret${s.hidden > 1 ? 's' : ''} hidden`]);
   if (s.zooms) chips.push(['var(--zoom)', `${s.zooms} zoom${s.zooms > 1 ? 's' : ''}`]);
   if (s.chapters) chips.push(['var(--text)', `${s.chapters} chapter${s.chapters > 1 ? 's' : ''}`]);
-  chips.push(['var(--faint)', `${fmt(plan.duration)} → ${fmt(plan.outDuration)}`]);
+  chips.push(['var(--faint)', `${fmt(plan.duration)} → ${fmt(plan.finalDuration)}`]);
   $('chips').replaceChildren(
     ...chips.map(([color, text]) => {
       const li = document.createElement('li');
@@ -332,9 +392,8 @@ function renderEditor() {
 }
 
 function renderFilm() {
-  const take = /** @type {any} */ (state.take);
   $('film').replaceChildren(
-    ...take.thumbs.map((/** @type {{url: string}} */ th) => {
+    ...state.take.thumbs.map((/** @type {{url: string}} */ th) => {
       const img = document.createElement('img');
       img.src = th.url;
       img.alt = '';
@@ -356,15 +415,19 @@ function renderBands() {
     el.title = title;
     return el;
   };
-  const els = [
-    ...plan.cuts.map((c) => band(c.reason === 'dead-air' ? 'air' : 'cut', c.src0, c.src1, c.reason === 'dead-air' ? 'Dead air trimmed' : c.reason === 'fumble' ? 'Fumble cut' : 'Direction removed')),
+  const camBig = [];
+  for (let i = 0; i < plan.camera.length; i++) {
+    if (plan.camera[i].mode === 'big') camBig.push(band('cam', plan.camera[i].src, plan.camera[i + 1]?.src ?? D, 'Big camera'));
+  }
+  $('bands').replaceChildren(
+    ...plan.cuts.map((c) => band(c.reason === 'dead-air' ? 'air' : 'cut', c.src0, c.src1, c.reason === 'dead-air' ? 'Dead air trimmed' : c.reason === 'fumble' ? 'Fumble cut' : 'Spoken command removed')),
     ...plan.speeds.map((s) => band('speed', s.src0, s.src1, `Fast-forward ${s.rate}×`)),
     ...plan.zooms.map((z) => band('zoom', z.src0, z.src1, `Zoom ${z.scale}×`)),
     ...plan.blurs.map((b) => band('blur', b.src0, b.src1, 'Hidden')),
     ...plan.spots.map((s) => band('spot', s.src0, s.src1, 'Spotlight')),
+    ...camBig,
     ...plan.chapters.map((c) => band('chap', c.src, c.src, `Chapter: ${c.title}`)),
-  ];
-  $('bands').replaceChildren(...els);
+  );
 }
 
 function renderNotes() {
@@ -373,7 +436,7 @@ function renderNotes() {
   if (!plan.commands.length) {
     const li = document.createElement('li');
     li.className = 'empty';
-    li.textContent = 'No directions in this take. Dead air was still trimmed and captions added.';
+    li.textContent = 'No commands in this take. Dead air was still trimmed and captions added.';
     list.replaceChildren(li);
     return;
   }
@@ -382,9 +445,6 @@ function renderNotes() {
       const li = document.createElement('li');
       li.className = 'note-item';
       li.dataset.on = String(c.enabled);
-      const stripe = document.createElement('span');
-      stripe.className = 'stripe';
-      stripe.style.background = COLORS[c.type];
       const body = document.createElement('div');
       const what = document.createElement('div');
       what.className = 'note-what';
@@ -403,20 +463,22 @@ function renderNotes() {
         body.append(eff);
       }
       const sw = document.createElement('label');
-      sw.className = 'switch';
+      sw.className = 'toggle bare';
       const box = document.createElement('input');
       box.type = 'checkbox';
       box.checked = c.enabled;
       box.id = `cmd-${c.id}`;
       box.setAttribute('aria-label', `${describe(c)} at ${fmt(c.time)}`);
-      box.addEventListener('click', (e) => e.stopPropagation());
+      const track = document.createElement('span');
+      track.className = 'track';
+      sw.append(box, track);
+      sw.addEventListener('click', (e) => e.stopPropagation());
       box.addEventListener('change', () => {
         state.disabled = box.checked ? state.disabled.filter((d) => d !== c.id) : [...state.disabled, c.id];
         rebuild();
-        toast(box.checked ? `Redone: ${describe(c)}` : `Undone: ${describe(c)}`);
+        toast(box.checked ? `Back on: ${describe(c)}` : `Undone: ${describe(c)}`);
       });
-      sw.append(box, document.createElement('span'));
-      li.append(stripe, body, sw);
+      li.append(badge(c.type, 'n-ico'), body, sw);
       li.addEventListener('click', () => jumpToSource(c.time - 2.5));
       return li;
     }),
@@ -431,7 +493,7 @@ function renderWords() {
     ...take.phrases.map((p, i) => {
       const li = document.createElement('li');
       const isCmd = plan.commands.some((c) => c.phrase === i && c.enabled);
-      li.dataset.cut = String(cutAt((p.start + p.end) / 2));
+      li.dataset.cut = String(!isCmd && cutAt((p.start + p.end) / 2));
       const tc = document.createElement('span');
       tc.className = 'tc';
       tc.textContent = fmt(p.start);
@@ -450,8 +512,7 @@ function renderWords() {
 }
 
 function renderExtras() {
-  const plan = /** @type {Plan} */ (state.plan);
-  const yt = youtubeChapters(plan);
+  const yt = youtubeChapters(/** @type {Plan} */ (state.plan));
   /** @type {HTMLTextAreaElement} */ ($('yt-chapters')).value = yt.text || '';
   $('yt-note').textContent = yt.reason;
 }
@@ -461,7 +522,7 @@ function renderTime(out) {
   const plan = currentPlan();
   if (!plan) return;
   $('tc').textContent = `${fmt(out)} / ${fmt(plan.outDuration)}`;
-  /** @type {HTMLInputElement} */ ($('scrub')).value = String(Math.round((out / Math.max(0.01, plan.outDuration)) * 1000));
+  input('scrub').value = String(Math.round((out / Math.max(0.01, plan.outDuration)) * 1000));
   const src = state.player?.source.time() ?? 0;
   $('playhead').style.left = `${(src / plan.duration) * 100}%`;
 }
@@ -475,7 +536,8 @@ function jumpToSource(t) {
 /** @param {boolean} on */
 function setPlaying(on) {
   $('big-play').hidden = on;
-  $('play-icon').setAttribute('d', on ? 'M7 5h4v14H7zM13 5h4v14h-4z' : 'M8 5v14l11-7z');
+  $('big-play').innerHTML = icon('play');
+  $('play').innerHTML = icon(on ? 'pause' : 'play');
   $('play').setAttribute('aria-label', on ? 'Pause' : 'Play');
 }
 
@@ -487,23 +549,101 @@ async function togglePlay() {
     setPlaying(false);
   } else {
     setPlaying(true);
+    $('drag-hint').hidden = true;
     await p.play();
   }
 }
 
-/** @param {boolean} raw */
-async function setRaw(raw) {
+function setViewButtons() {
+  for (const v of /** @type {View[]} */ (['final', 'demo', 'raw'])) $(`view-${v}`).setAttribute('aria-checked', String(state.view === v));
+}
+
+function updateExportLabel() {
+  const fmtInfo = exportFormat();
+  const ext = fmtInfo ? fmtInfo.ext.toUpperCase() : '';
+  const name = state.view === 'demo' ? 'demo' : state.view === 'raw' ? 'raw' : 'final';
+  $('export').textContent = fmtInfo ? `Export ${name} video (${ext})` : 'Export not supported in this browser';
+  $('export-which').innerHTML =
+    state.view === 'demo'
+      ? 'Exports the <b>Demo</b> version: your commands stay in, each with a label, and the parts that would be cut play fast under a red overlay. Perfect for showing off Retake.'
+      : state.view === 'raw'
+        ? 'Exports the <b>Raw</b> take, unedited.'
+        : 'Exports the <b>Final</b> version. Switch to <b>Demo</b> above for a version that shows each command working.';
+}
+
+/** @param {View} view */
+async function setView(view) {
   const p = state.player;
-  if (!p || state.exporting) return;
+  if (!p || state.exporting || state.view === view) return;
   const wasPlaying = p.playing;
   const src = p.source.time();
   p.pause();
-  state.showRaw = raw;
-  $('ab-edit').setAttribute('aria-pressed', String(!raw));
-  $('ab-raw').setAttribute('aria-pressed', String(raw));
+  state.view = view;
+  setViewButtons();
+  updateExportLabel();
   const plan = currentPlan();
   await p.seekOut(srcToOut(plan.segments, src, plan.outDuration));
   if (wasPlaying) await p.play();
+  else setPlaying(false);
+}
+
+// ---------------------------------------------------------------- bubble dragging
+
+/** Is the canvas point on the camera bubble right now? */
+function bubbleAt(/** @type {number} */ x, /** @type {number} */ y) {
+  const p = state.player;
+  if (!p?.source.camera || !state.look.camera) return null;
+  const canvas = p.canvas;
+  const mode = cameraModeAt(currentPlan(), p.source.time()).to;
+  if (mode !== 'small') return null;
+  const r = camRect('small', canvas.width, canvas.height, state.look);
+  const cx = r.x + r.d / 2, cy = r.y + r.d / 2;
+  return Math.hypot(x - cx, y - cy) <= r.d / 2 ? { cx, cy } : null;
+}
+
+function wireDrag() {
+  const canvas = /** @type {HTMLCanvasElement} */ ($('screen'));
+  const toCanvas = (/** @type {PointerEvent} */ e) => {
+    const rect = canvas.getBoundingClientRect();
+    return { x: ((e.clientX - rect.left) / rect.width) * canvas.width, y: ((e.clientY - rect.top) / rect.height) * canvas.height };
+  };
+  /** @type {{dx: number, dy: number, moved: number, sx: number, sy: number} | null} */
+  let drag = null;
+  let downAt = /** @type {{x: number, y: number} | null} */ (null);
+  canvas.addEventListener('pointerdown', (e) => {
+    const pt = toCanvas(e);
+    downAt = pt;
+    const hit = bubbleAt(pt.x, pt.y);
+    if (hit) {
+      drag = { dx: pt.x - hit.cx, dy: pt.y - hit.cy, moved: 0, sx: pt.x, sy: pt.y };
+      canvas.setPointerCapture(e.pointerId);
+      canvas.style.cursor = 'grabbing';
+    }
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    const pt = toCanvas(e);
+    if (drag) {
+      drag.moved = Math.max(drag.moved, Math.hypot(pt.x - drag.sx, pt.y - drag.sy));
+      state.look = { ...state.look, camPos: { x: (pt.x - drag.dx) / canvas.width, y: (pt.y - drag.dy) / canvas.height } };
+      for (const b of document.querySelectorAll('.corners button')) b.setAttribute('aria-pressed', 'false');
+      state.player?.paint();
+    } else {
+      canvas.style.cursor = bubbleAt(pt.x, pt.y) ? 'grab' : 'pointer';
+    }
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    const wasDrag = drag && drag.moved > 4;
+    drag = null;
+    canvas.style.cursor = '';
+    const pt = toCanvas(e);
+    const tapped = downAt && Math.hypot(pt.x - downAt.x, pt.y - downAt.y) < 6;
+    downAt = null;
+    if (wasDrag) {
+      $('drag-hint').hidden = true;
+      return;
+    }
+    if (tapped) void togglePlay();
+  });
 }
 
 // ---------------------------------------------------------------- export
@@ -521,13 +661,14 @@ function download(blob, name) {
 
 function baseName() {
   const d = new Date();
-  return `retake-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`;
+  const p = (/** @type {number} */ n) => String(n).padStart(2, '0');
+  return `retake-${state.view}-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
 }
 
 async function runExport() {
   const p = state.player;
   if (!p || state.exporting) return;
-  if (state.showRaw) await setRaw(false);
+  await document.fonts?.ready;
   state.exporting = new AbortController();
   /** @type {HTMLButtonElement} */ ($('export')).disabled = true;
   $('export-progress').hidden = false;
@@ -545,7 +686,7 @@ async function runExport() {
     const a = /** @type {HTMLAnchorElement} */ ($('download-video'));
     a.href = URL.createObjectURL(blob);
     a.download = `${baseName()}.${ext}`;
-    a.textContent = `Download video (${(blob.size / 1e6).toFixed(1)} MB)`;
+    a.replaceChildren(iconEl('download'), `Download video (${(blob.size / 1e6).toFixed(1)} MB)`);
     a.hidden = false;
     toast('Your video is ready.');
   } catch (e) {
@@ -558,34 +699,46 @@ async function runExport() {
   }
 }
 
-/** @param {string} id @param {string} msg */
-function note(id, msg) {
-  const el = $(id);
-  el.textContent = msg;
-  el.hidden = false;
-}
-
 // ---------------------------------------------------------------- wire up
 
-function selectTab(/** @type {string} */ name) {
+/** @param {string} name */
+function selectTab(name) {
   for (const t of ['notes', 'look', 'words', 'export']) {
     $(`tab-${t}`).setAttribute('aria-selected', String(t === name));
     $(`panel-${t}`).hidden = t !== name;
   }
 }
 
+function lookChanged() {
+  const shape = /** @type {HTMLElement} */ (document.querySelector('.seg [aria-checked="true"]'))?.dataset.shape;
+  state.look = {
+    ...state.look,
+    captions: input('opt-captions').checked,
+    captionSize: Number(input('opt-capsize').value) / 1000,
+    badge: input('opt-badge').checked,
+    watermark: input('opt-mark').checked,
+    camera: input('opt-cam').checked,
+    camShape: shape === 'rounded' ? 'rounded' : 'circle',
+    camSize: Number(input('opt-camsize').value) / 100,
+  };
+  state.player?.paint();
+}
+
 async function init() {
   renderVocab();
+  setPlaying(false);
   if (prefs.get('camera') === '0') input('camera').checked = false;
+  if (prefs.get('start-big') === '1') input('start-big').checked = true;
   const lang = prefs.get('lang');
   if (lang) /** @type {HTMLSelectElement} */ ($('lang')).value = lang;
 
   if (!canRecord()) note('support-note', 'Recording needs Chrome, Edge or Firefox on a computer. You can still try the sample take.');
-  else if (!canTranscribe()) note('support-note', 'This browser can record, but only Chrome and Edge can hear your directions.');
+  else if (!canTranscribe()) note('support-note', 'This browser can record, but only Chrome and Edge can hear your commands.');
 
   $('record').addEventListener('click', startRecording);
   $('stop').addEventListener('click', stopRecording);
   $('pop-out').addEventListener('click', popOut);
+  $('count-cancel').addEventListener('click', cancelCountdown);
   $('try-sample').addEventListener('click', async () => {
     $('try-sample').textContent = 'Loading…';
     await new Promise((r) => setTimeout(r, 30));
@@ -600,9 +753,8 @@ async function init() {
 
   $('play').addEventListener('click', togglePlay);
   $('big-play').addEventListener('click', togglePlay);
-  $('screen').addEventListener('click', togglePlay);
-  $('ab-edit').addEventListener('click', () => setRaw(false));
-  $('ab-raw').addEventListener('click', () => setRaw(true));
+  wireDrag();
+  for (const v of /** @type {View[]} */ (['final', 'demo', 'raw'])) $(`view-${v}`).addEventListener('click', () => setView(v));
   $('scrub').addEventListener('input', () => {
     const plan = currentPlan();
     void state.player?.seekOut((Number(input('scrub').value) / 1000) * plan.outDuration);
@@ -620,31 +772,30 @@ async function init() {
   for (const t of ['notes', 'look', 'words', 'export']) $(`tab-${t}`).addEventListener('click', () => selectTab(t));
 
   for (const id of ['opt-dead', 'opt-speed', 'opt-zoom']) $(id).addEventListener('change', rebuild);
-  const lookChanged = () => {
-    state.look = {
-      captions: input('opt-captions').checked,
-      captionSize: Number(input('opt-capsize').value) / 1000,
-      badge: input('opt-badge').checked,
-      watermark: input('opt-mark').checked,
-      camera: input('opt-cam').checked,
-      camShape: /** @type {'circle'|'rounded'} */ (/** @type {HTMLSelectElement} */ ($('opt-camshape')).value),
-      camCorner: /** @type {'br'|'bl'|'tr'|'tl'} */ (/** @type {HTMLSelectElement} */ ($('opt-camcorner')).value),
-      camSize: Number(input('opt-camsize').value) / 100,
-    };
-    state.player?.paint();
-  };
-  for (const id of ['opt-captions', 'opt-capsize', 'opt-badge', 'opt-mark', 'opt-cam', 'opt-camshape', 'opt-camcorner', 'opt-camsize']) {
+  for (const id of ['opt-captions', 'opt-capsize', 'opt-badge', 'opt-mark', 'opt-cam', 'opt-camsize']) {
     $(id).addEventListener('input', lookChanged);
     $(id).addEventListener('change', lookChanged);
+  }
+  for (const b of document.querySelectorAll('.seg button')) {
+    b.addEventListener('click', () => {
+      for (const o of document.querySelectorAll('.seg button')) o.setAttribute('aria-checked', String(o === b));
+      lookChanged();
+    });
+  }
+  for (const b of document.querySelectorAll('.corners button')) {
+    b.addEventListener('click', () => {
+      for (const o of document.querySelectorAll('.corners button')) o.setAttribute('aria-pressed', String(o === b));
+      state.look = { ...state.look, camPos: null, camCorner: /** @type {any} */ (/** @type {HTMLElement} */ (b).dataset.corner) };
+      state.player?.paint();
+    });
   }
 
   $('export').addEventListener('click', runExport);
   $('export-cancel').addEventListener('click', () => state.exporting?.abort());
-  $('dl-srt').addEventListener('click', () => download(new Blob([toSrt(/** @type {Plan} */ (state.plan).captions)], { type: 'text/plain' }), `${baseName()}.srt`));
-  $('dl-vtt').addEventListener('click', () => download(new Blob([toVtt(/** @type {Plan} */ (state.plan).captions)], { type: 'text/vtt' }), `${baseName()}.vtt`));
+  $('dl-srt').addEventListener('click', () => download(new Blob([toSrt(currentPlan().captions)], { type: 'text/plain' }), `${baseName()}.srt`));
+  $('dl-vtt').addEventListener('click', () => download(new Blob([toVtt(currentPlan().captions)], { type: 'text/vtt' }), `${baseName()}.vtt`));
   $('dl-txt').addEventListener('click', () => {
-    const plan = /** @type {Plan} */ (state.plan);
-    const text = plan.captions.map((c) => `[${fmt(c.out0)}] ${c.text}`).join('\n');
+    const text = currentPlan().captions.map((c) => `[${fmt(c.out0)}] ${c.text}`).join('\n');
     download(new Blob([text], { type: 'text/plain' }), `${baseName()}-transcript.txt`);
   });
   $('copy-chapters').addEventListener('click', async () => {
@@ -658,6 +809,7 @@ async function init() {
   });
 
   document.addEventListener('keydown', (e) => {
+    if (!$('countdown').hidden && e.key === 'Escape') cancelCountdown();
     if ($('edit').hidden || /** @type {HTMLElement} */ (e.target).closest('input, select, textarea')) return;
     if (e.code === 'Space') {
       e.preventDefault();
@@ -665,11 +817,15 @@ async function init() {
     }
   });
 
-  // Deep link for judges: ?sample opens the sample take straight away.
-  if (new URLSearchParams(location.search).has('sample')) $('try-sample').click();
+  // Deep links for judges: ?sample opens the sample take; ?sample&demo opens it in Demo view.
+  const q = new URLSearchParams(location.search);
+  if (q.has('sample')) {
+    await openTake(buildSampleTake());
+    if (q.has('demo')) await setView('demo');
+  }
 }
 
 void init();
 
-// Exposed for the demo checklist in the README and for automated checks.
-/** @type {any} */ (window).retake = { state, stripCommands };
+// Exposed for automated checks.
+/** @type {any} */ (window).retake = { state, stripCommands, setView };

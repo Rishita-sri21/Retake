@@ -124,13 +124,21 @@ export const GRAMMAR = [
     type: 'camBig',
     name: 'Big camera',
     say: 'big camera',
-    patterns: [/\b(?:big camera|camera big|full(?: ?screen)? camera|face to camera|show my face)\b/u, /\bcamera bada karo\b/u, /(?:कैमरा बड़ा करो)/u],
+    patterns: [
+      /\b(?:big|bigger|large|larger|full|full ?screen|pick|bick) ?(?:camera|cam|camra|kamera)\b|\b(?:camera|cam) (?:big|bigger|full ?screen)\b|\b(?:show my face|face to camera|zoom (?:in )?on me)\b/u,
+      /\bcamera bada (?:karo|kar do)\b/u,
+      /(?:कैमरा बड़ा करो|बड़ा कैमरा)/u,
+    ],
   },
   {
     type: 'camSmall',
     name: 'Camera to the corner',
     say: 'small camera',
-    patterns: [/\b(?:small camera|camera small|camera (?:in the |to the )?corner|back to (?:the )?screen)\b/u, /\bcamera chhota karo\b/u, /(?:कैमरा छोटा करो)/u],
+    patterns: [
+      /\b(?:small|smaller|little|mini) ?(?:camera|cam|camra|kamera)\b|\b(?:camera|cam) (?:small|smaller|in (?:the |to the )?corner|to (?:the )?corner)\b|\bback to (?:the )?screen\b/u,
+      /\bcamera chhota (?:karo|kar do)\b/u,
+      /(?:कैमरा छोटा करो|छोटा कैमरा)/u,
+    ],
   },
   {
     type: 'camHide',
@@ -165,12 +173,10 @@ export function normalise(s) {
 /** @param {string} s */
 const words = (s) => s.split(/[\s,.!?;:।]+/u).filter(Boolean);
 
-/** @param {string} s */
+/** Sentence case: first letter capital, the rest as spoken. @param {string} s */
 function titleCase(s) {
-  return s
-    .replace(/[.!?।]+$/u, '')
-    .trim()
-    .replace(/(^|\s)(\p{Ll})/gu, (_, sp, ch) => sp + ch.toUpperCase());
+  const t = s.replace(/[.!?।]+$/u, '').trim();
+  return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
 /**

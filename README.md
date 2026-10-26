@@ -35,17 +35,19 @@ Hinglish and Hindi work too: *kaat do*, *chhupa do*, *zoom karo*, *tez karo*, *à
 
 And without being asked:
 
-- **You, in the corner.** Your webcam is recorded alongside the screen and shown as a circle or rounded square in any corner. Its ring turns yellow while you're speaking. Shape, corner and size can be changed after recording, because the camera is kept as its own track.
+- **You, in a bubble.** Your webcam is recorded alongside the screen and shown as a circle or rounded square. Drag it anywhere on the preview, snap it to a corner, or resize it, all after recording, because the camera is kept as its own track. Its ring glows while you speak.
 - **Dead air is trimmed**, but only where nothing happens on screen. If you're silent because you're typing, it's kept.
 - **Captions** are burned in and exported as `.srt` / `.vtt`, with your directions removed from them.
 - **YouTube chapters** are generated, with a warning if they don't meet YouTube's rules.
-- **Live slate:** while you record, a floating picture-in-picture slate shows a timer, a mic level, what Retake heard, and each direction as it lands.
+- **Live slate with your camera:** a 3-2-1 countdown (Retake is already listening, so "big camera" works from the first word), then a slate showing your camera preview, a timer, a mic level, what Retake heard, and each command as it lands. It can float above other windows.
+- **Smooth cuts:** every cut is snapped to a silence, crossfaded over a third of a second, and the audio is ramped so there are no clicks.
+- **Three versions of every take:** **Final** (what viewers get), **Demo** (your spoken commands stay in, each labelled with what Retake did, and the parts that would be cut play fast under a red overlay, which is ideal for showing Retake off) and **Raw**. Any of them can be exported.
 - **Nothing is final:** every direction appears in the Director's notes with a switch to undo it, and a **Raw take** toggle shows the original for comparison.
 - **Private:** recording, speech recognition (Chrome's built-in), analysis and rendering all run in the browser. The last take is kept in this browser so a refresh doesn't lose it.
 
 ## Try it
 
-- **Sample take, no recording needed:** open the app and tap **Try the sample take** (or go to `/?sample`). It's a 72-second recording of a developer building a weather app, complete with dead air, a 20-second `npm install`, a pasted API key, a fumbled sentence and a tiny chart, and narration that directs Retake to fix all of it. Retake turns it into a 38-second video.
+- **Sample take, no recording needed:** open the app and tap **Try the sample take** (or go to `/?sample`, or `/?sample&demo` to open it in the Demo version). It's a 72-second recording of a developer building a weather app, complete with dead air, a 20-second `npm install`, a pasted API key, a fumbled sentence and a tiny chart, and narration that directs Retake to fix all of it. Retake turns it into a 38-second video.
 - **Your own take:** **Record a take** in Chrome or Edge on a computer, pick a window or tab, and talk.
 
 ## How it works
@@ -86,6 +88,8 @@ The result is a list of segments (with speed), zooms, blurs, spotlights, chapter
 
 The plan is rebuilt from scratch whenever you flip a switch or change a setting, so editing is non-destructive. **The renderer** (`src/render.js`) draws each output frame from the plan: the virtual camera with eased zoom, pixelation, spotlight, cards, badge and captions. The preview and the export share it, so what you see is what you get. Export records the canvas in real time with the original audio, pausing the recorder while the video seeks across a cut so no frozen frames get in.
 
+**Type:** Fredoka and Nunito, rounded and calm, in both the app and the video overlays.
+
 **No dependencies.** No frameworks, no build step, no npm packages. The app is plain ES modules; the tests use Node's built-in runner.
 
 ## Tests
@@ -94,7 +98,7 @@ The plan is rebuilt from scratch whenever you flip a switch or change a setting,
 npm test
 ```
 
-19 tests on the command parser, motion analysis and planner, including:
+21 tests on the command parser, motion analysis and planner, including:
 
 - every direction in English, Hinglish and Devanagari Hindi;
 - ordinary narration ("this hides the sidebar", "the cut off date") is not mistaken for a direction;
@@ -104,7 +108,8 @@ npm test
 - zoom aims at the right region, eases, and stays inside the frame;
 - switching a direction off restores the footage;
 - sourceâ†”output time mapping round-trips exactly; SRT and YouTube chapter output;
-- camera directions build a timeline with smooth transitions.
+- camera directions build a timeline with smooth transitions, and are ignored inside ordinary sentences ("we bought a big camera");
+- the Demo version keeps commands audible, plays would-be cuts fast, and still reports the final cut's numbers.
 
 The full app was also driven end to end in headless Chromium: the sample take, every effect rendered, undo, Raw/Retake comparison, a complete real-time export (checked with ffprobe), and a real recording using simulated screen, microphone and camera devices.
 

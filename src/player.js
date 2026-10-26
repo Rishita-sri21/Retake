@@ -267,11 +267,12 @@ export class Player {
 
   applyRate() {
     this.source.setRate(this.rate);
-    if (this.gain) this.gain.gain.value = this.rate > 1 ? 0 : 1;
+    this.ramp(this.rate > 1 ? 0 : 1, 0.03);
   }
 
   /** @param {number} o */
   async seekOut(o) {
+    this.fadeStart = 0;
     const plan = this.getPlan();
     const at = outToSrc(plan.segments, Math.max(0, Math.min(o, plan.outDuration)));
     if (!at) return;
@@ -309,11 +310,16 @@ export class Player {
         return;
       }
       if (src < seg.src0 - 0.04) {
-        // We're inside a cut: jump to where the video resumes.
+        // We're inside a cut: jump to where the video resumes. Keep the last
+        // frame and dissolve from it, and dip the sound, so the cut is smooth.
         this.busy = true;
+        this.snapshot();
+        this.ramp(0, 0.015);
         this.onJump?.(true);
         this.source.seek(seg.src0).then(() => {
           this.busy = false;
+          this.fadeStart = performance.now();
+          this.ramp(this.rate > 1 ? 0 : 1, 0.04);
           this.onJump?.(false);
         });
         return;
@@ -328,12 +334,39 @@ export class Player {
     this.paint();
   }
 
+  /** Remember the current frame for a crossfade. */
+  snapshot() {
+    const c = (this.fadeCanvas = this.fadeCanvas || document.createElement('canvas'));
+    c.width = this.canvas.width;
+    c.height = this.canvas.height;
+    /** @type {CanvasRenderingContext2D} */ (c.getContext('2d')).drawImage(this.canvas, 0, 0);
+    this.fadeStart = 0;
+  }
+
+  /** Smoothly move the volume, avoiding clicks at cuts. @param {number} to @param {number} tc */
+  ramp(to, tc) {
+    if (!this.gain || !this.actx) return;
+    const g = this.gain.gain;
+    g.cancelScheduledValues(this.actx.currentTime);
+    g.setTargetAtTime(to, this.actx.currentTime, tc);
+  }
+
   paint() {
     const plan = this.getPlan();
     const src = this.source.time();
     this.source.camera?.sync(src, this.playing, this.rate);
     const cam = this.source.camera && this.source.camera.width ? this.source.camera : null;
     drawFrame(this.ctx, this.canvas.width, this.canvas.height, this.source, plan, src, this.out, this.rate, this.getLook(), cam);
+    // Crossfade from the frame before the cut.
+    if (this.fadeStart && this.fadeCanvas) {
+      const a = 1 - (performance.now() - this.fadeStart) / 320;
+      if (a > 0) {
+        this.ctx.save();
+        this.ctx.globalAlpha = a * a;
+        this.ctx.drawImage(this.fadeCanvas, 0, 0);
+        this.ctx.restore();
+      } else this.fadeStart = 0;
+    }
   }
 
   destroy() {

@@ -34,6 +34,10 @@ import { focusAt, secretAt, goneAt, activity } from './motion.js';
  * @property {number} zoom           Zoom factor.
  * @property {number} levelThreshold Loudness below this is silence.
  * @property {string[]} disabled     Command ids the user switched off.
+ * @property {boolean} showDirections Demo mode: keep the spoken directions in the video,
+ *                                    label them, and play what would be cut fast under a red overlay.
+ * @property {number} ghostRate       Speed of would-be-cut footage in demo mode.
+ * @property {'small'|'big'|'hidden'|undefined} [cameraStart]
  */
 
 /** @type {Options} */
@@ -45,10 +49,12 @@ export const DEFAULTS = {
   zoom: 2,
   levelThreshold: 0.04,
   disabled: [],
+  showDirections: false,
+  ghostRate: 3,
 };
 
 /**
- * @typedef {{src0: number, src1: number, rate: number, out0: number, out1: number}} Segment
+ * @typedef {{src0: number, src1: number, rate: number, out0: number, out1: number, ghost?: 'fumble'|'dead-air'}} Segment
  * @typedef {{src0: number, src1: number, reason: 'fumble'|'command'|'dead-air', by?: string}} Cut
  * @typedef {{src0: number, src1: number, rate: number, by: string}} Speed
  * @typedef {{src0: number, src1: number, x: number, y: number, scale: number, by: string}} Zoom
@@ -61,7 +67,8 @@ export const DEFAULTS = {
  *   duration: number, outDuration: number,
  *   segments: Segment[], cuts: Cut[], speeds: Speed[], zooms: Zoom[], blurs: Blur[], spots: Spot[],
  *   chapters: Chapter[], title: string | null, marks: {src: number, out: number, by: string}[],
- *   camera: {src: number, mode: CamMode, by?: string}[], levels: {dt: number, values: ArrayLike<number>}, levelThreshold: number,
+ *   camera: {src: number, mode: CamMode, by?: string}[],
+ *   directions: {src0: number, src1: number, heard: string, did: string, type: string}[], showDirections: boolean, finalDuration: number, levels: {dt: number, values: ArrayLike<number>}, levelThreshold: number,
  *   captions: Caption[], commands: (Command & {effect: string})[],
  *   stats: {removed: number, fumbles: number, deadAir: number, hidden: number, zooms: number, chapters: number, sped: number}
  * }} Plan
@@ -143,7 +150,7 @@ export function buildPlan(take, options = {}) {
   const markSrc = [];
   let title = /** @type {string|null} */ (null);
   /** @type {{src: number, mode: CamMode, by?: string}[]} */
-  const camera = [{ src: 0, mode: take.cameraStart || 'small' }];
+  const camera = [{ src: 0, mode: o.cameraStart || take.cameraStart || 'small' }];
 
   // Phrases that are only a direction to the editor never appear in the video.
   for (const c of live) {
@@ -226,6 +233,12 @@ export function buildPlan(take, options = {}) {
       case 'camSmall':
       case 'camShow':
       case 'camHide': {
+        // Camera directions only count when said on their own, so "we bought
+        // a big camera" in narration doesn't resize you.
+        if (!c.standalone) {
+          c.effect = 'Ignored: said as part of a sentence';
+          break;
+        }
         const mode = c.type === 'camBig' ? 'big' : c.type === 'camHide' ? 'hidden' : 'small';
         camera.push({ src: after, mode, by: c.id });
         c.effect = mode === 'big' ? 'Your face fills the frame' : mode === 'hidden' ? 'Camera bubble hidden' : 'Camera bubble in the corner';
@@ -272,24 +285,58 @@ export function buildPlan(take, options = {}) {
   }
   if (D > at + EPS) keep.push({ src0: at, src1: D });
 
-  /** @type {Segment[]} */
-  const segments = [];
-  let out = 0;
-  for (const k of keep) {
-    const marks = [k.src0, k.src1];
-    for (const s of speeds) for (const t of [s.src0, s.src1]) if (t > k.src0 && t < k.src1) marks.push(t);
-    marks.sort((a, b) => a - b);
-    for (let i = 0; i < marks.length - 1; i++) {
-      const a = marks[i], b = marks[i + 1];
-      if (b - a < EPS) continue;
-      const mid = (a + b) / 2;
-      const sp = speeds.find((s) => mid >= s.src0 && mid < s.src1);
-      const rate = sp ? sp.rate : 1;
-      segments.push({ src0: a, src1: b, rate, out0: out, out1: out + (b - a) / rate });
-      out += (b - a) / rate;
+  /**
+   * @param {{src0: number, src1: number}[]} ranges
+   * @param {{src0: number, src1: number, rate: number, ghost?: 'fumble'|'dead-air'}[]} rated
+   */
+  const segmentsOf = (ranges, rated) => {
+    /** @type {Segment[]} */
+    const segs = [];
+    let out = 0;
+    for (const k of ranges) {
+      const marks = [k.src0, k.src1];
+      for (const s of rated) for (const t of [s.src0, s.src1]) if (t > k.src0 && t < k.src1) marks.push(t);
+      marks.sort((a, b) => a - b);
+      for (let i = 0; i < marks.length - 1; i++) {
+        const a = marks[i], b = marks[i + 1];
+        if (b - a < EPS) continue;
+        const mid = (a + b) / 2;
+        const sp = rated.find((s) => mid >= s.src0 && mid < s.src1);
+        const rate = sp ? sp.rate : 1;
+        /** @type {Segment} */
+        const seg = { src0: a, src1: b, rate, out0: out, out1: out + (b - a) / rate };
+        if (sp?.ghost) seg.ghost = sp.ghost;
+        segs.push(seg);
+        out += (b - a) / rate;
+      }
     }
+    return { segs, out };
+  };
+
+  const finalCut = segmentsOf(keep, speeds);
+  let segments = finalCut.segs;
+  let outDuration = finalCut.out;
+
+  if (o.showDirections) {
+    // Demo mode: nothing is removed. Spoken directions stay audible; the
+    // fumbles and dead air play fast under a red "cut" overlay instead.
+    /** @type {{src0: number, src1: number, rate: number, ghost: 'fumble'|'dead-air'}[]} */
+    const ghosts = [];
+    for (const r of removed) {
+      const parts = cuts.filter((c) => c.reason !== 'command' && c.src0 < r.src1 - EPS && c.src1 > r.src0 + EPS);
+      if (!parts.length) continue;
+      const src0 = Math.max(r.src0, Math.min(...parts.map((c) => c.src0)));
+      const src1 = Math.min(r.src1, Math.max(...parts.map((c) => c.src1)));
+      const kind = parts.some((c) => c.reason === 'fumble') ? 'fumble' : 'dead-air';
+      // A fumble cut ends where "scratch that" ends; keep the direction itself at normal speed.
+      const cmd = cuts.find((c) => c.reason === 'command' && c.by && parts.some((f) => f.by === c.by));
+      const end = kind === 'fumble' && cmd ? Math.max(src0, cmd.src0) : src1;
+      if (end - src0 > 0.1) ghosts.push({ src0, src1: end, rate: o.ghostRate, ghost: kind });
+    }
+    const demo = segmentsOf([{ src0: 0, src1: D }], [...speeds.filter((sp) => !ghosts.some((g) => sp.src0 < g.src1 && sp.src1 > g.src0)), ...ghosts]);
+    segments = demo.segs;
+    outDuration = demo.out;
   }
-  const outDuration = out;
 
   /** @param {number} t */
   const toOut = (t) => srcToOut(segments, t, outDuration);
@@ -319,6 +366,14 @@ export function buildPlan(take, options = {}) {
 
   const chapters = chapterSrc.map((c) => ({ ...c, out: toOut(c.src) }));
 
+  // Labels shown in demo mode while each direction is spoken.
+  const directions = o.showDirections
+    ? live.map((c) => {
+        const p = P[c.phrase];
+        return { src0: p.start, src1: Math.min(D, p.end + 1.6), heard: c.heard, did: c.effect, type: c.type };
+      })
+    : [];
+
   return {
     duration: D,
     outDuration,
@@ -337,12 +392,15 @@ export function buildPlan(take, options = {}) {
     title,
     marks: markSrc.map((m) => ({ ...m, out: toOut(m.src) })),
     camera: camera.sort((a, b) => a.src - b.src),
+    directions,
+    showDirections: o.showDirections,
+    finalDuration: finalCut.out,
     levels: take.levels,
     levelThreshold: o.levelThreshold,
     captions,
     commands,
     stats: {
-      removed: D - outDuration,
+      removed: D - finalCut.out,
       fumbles: live.filter((c) => c.type === 'cut').length,
       deadAir,
       hidden: blurs.length,

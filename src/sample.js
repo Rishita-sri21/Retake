@@ -59,8 +59,8 @@ const C = {
   bar2: '#9bb3ff',
 };
 
-const MONO = '"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace';
-const SANS = '"IBM Plex Sans", system-ui, sans-serif';
+const MONO = '"DM Mono", ui-monospace, Menlo, Consolas, monospace';
+const SANS = '"Nunito", system-ui, sans-serif';
 
 /** Characters of `s` typed between t0 and t1. @param {string} s @param {number} t @param {number} t0 @param {number} t1 */
 function typed(s, t, t0, t1) {

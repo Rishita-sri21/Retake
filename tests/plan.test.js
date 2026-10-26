@@ -57,8 +57,8 @@ test('understands Hinglish and Hindi directions', () => {
 
 test('chapter and title labels are captured and tidied', () => {
   const [c, t] = parseCommands([P('Chapter one, setting up the project.', 0, 2), P('Title: building a weather app', 3, 5)]);
-  assert.equal(c.label, 'Setting Up The Project');
-  assert.equal(t.label, 'Building A Weather App');
+  assert.equal(c.label, 'Setting up the project');
+  assert.equal(t.label, 'Building a weather app');
 });
 
 test('a phrase is cut only when it is (almost) just the command', () => {
@@ -187,10 +187,10 @@ test('chapters map to output time and export for YouTube', () => {
     31,
   );
   const plan = buildPlan(t, { trimDeadAir: false });
-  assert.equal(plan.title, 'Weather App');
+  assert.equal(plan.title, 'Weather app');
   assert.equal(plan.chapters.length, 2);
   const yt = youtubeChapters(plan);
-  assert.match(yt.text, /^00:00 Weather App\n00:0\d Setup\n00:1\d Deploy$/);
+  assert.match(yt.text, /^00:00 Weather app\n00:0\d Setup\n00:1\d Deploy$/);
   assert.equal(yt.valid, false, 'first chapter is under 10s');
 });
 
@@ -223,4 +223,27 @@ test('camera directions build a timeline with smooth transitions', async () => {
   assert.deepEqual([moving.from, moving.to], ['big', 'small']);
   assert.ok(moving.k > 0 && moving.k < 1);
   assert.equal(plan.cuts.filter((c) => c.reason === 'command').length, 3, 'camera directions are cut from the video');
+});
+
+test('demo mode keeps directions audible and plays would-be cuts fast', () => {
+  const t = take(
+    [P('Here we open the settings', 1, 4), P('then we click the uh, the thing', 5, 8), P('scratch that', 8.6, 9.6), P('then we click save', 10.2, 12.5)],
+    14,
+  );
+  const final = buildPlan(t, { trimDeadAir: false });
+  const demo = buildPlan(t, { trimDeadAir: false, showDirections: true });
+  const ghost = demo.segments.find((s) => s.ghost === 'fumble');
+  assert.ok(ghost && ghost.rate === 3, 'the fumble plays fast');
+  assert.ok(ghost.src1 <= 8.6, 'the fumble ghost stops where "scratch that" begins');
+  const said = demo.segments.find((s) => s.src0 <= 9 && s.src1 > 9);
+  assert.equal(said.rate, 1, '"scratch that" is heard at normal speed');
+  assert.ok(demo.outDuration > final.outDuration);
+  assert.equal(demo.stats.removed, final.stats.removed, 'the summary still describes the final cut');
+  assert.equal(demo.directions.length, 1);
+  assert.equal(demo.directions[0].heard, 'scratch that');
+});
+
+test('camera directions inside a sentence are ignored', () => {
+  const plan = buildPlan(take([P('we bought a big camera for the shoot', 1, 4)], 6), { trimDeadAir: false });
+  assert.deepEqual(plan.camera.map((c) => c.mode), ['small']);
 });
